@@ -1,0 +1,27 @@
+{
+  "name": "Broad Market",
+  "tickers": [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "XLF",
+    "XLE",
+    "XLV",
+    "XLK",
+    "GLD",
+    "TLT",
+    "VXX"
+  ],
+  "created_at": "2024-01-01T00:00:00",
+  "count": 10,
+  "metadata": {
+    "description": "Diversified across major asset classes: equity indices, sector ETFs, commodities, bonds, and volatility",
+    "sectors": {
+      "Equity Indices": ["SPY", "QQQ", "IWM"],
+      "Sector ETFs": ["XLF", "XLE", "XLV", "XLK"],
+      "Commodities": ["GLD"],
+      "Fixed Income": ["TLT"],
+      "Volatility": ["VXX"]
+    }
+  }
+}
