@@ -7,7 +7,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import sys
+import importlib
 from pathlib import Path
+
+# Force reload data.fetcher module
+if 'data.fetcher' in sys.modules:
+    importlib.reload(sys.modules['data.fetcher'])
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -17,6 +22,8 @@ from models.black_scholes import BlackScholes
 from uncertainty.conformal import ConformalPredictor, VolatilitySurfaceUncertainty, BootstrapGreeks
 from visualization.surface_plot import VolatilitySurfacePlotter
 from arbitrage.detector import ArbitrageDetector
+
+
 
 # Force reload modules on every run
 if 'modules_reloaded' not in st.session_state:
