@@ -2,13 +2,13 @@
 Options Data Fetcher
 Retrieves real-time and historical options data from market sources.
 """
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import warnings
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -37,6 +37,25 @@ class OptionDataFetcher:
         self.data = None
         self.spot_price = None
         self._underlying = None
+        self._last_request_time = 0
+        self._request_count = 0
+        
+    def _rate_limit(self):
+        """
+        Enforce rate limiting to avoid Yahoo Finance 429 errors.
+        Waits 2 seconds between requests and tracks request count.
+        """
+        current_time = time.time()
+        time_since_last = current_time - self._last_request_time
+        
+        if time_since_last < 2:
+            time.sleep(2 - time_since_last)
+        
+        self._last_request_time = time.time()
+        self._request_count += 1
+        
+        if self._request_count % 10 == 0:
+            time.sleep(5)
         
     def fetch_underlying_data(self) -> Dict:
         """
@@ -45,276 +64,235 @@ class OptionDataFetcher:
         Returns:
             Dictionary with current price, volume, and other metrics
         """
-        ticker_obj = yf.Ticker(self.ticker)
-        info = ticker_obj.info
+        self._rate_limit()
         
-        self.spot_price = info.get('currentPrice', info.get('regularMarketPrice'))
-        
-        return {
-            'price': self.spot_price,
-            'volume': info.get('volume'),
-            'bid': info.get('bid'),
-            'ask': info.get('ask'),
-            'previous_close': info.get('previousClose')
-        }
+        try:
+            ticker_obj = yf.Ticker(self.ticker)
+            info = ticker_obj.info
+            
+            self.spot_price = info.get('currentPrice', info.get('regularMarketPrice', 100))
+            
+            return {
+                'ticker': self.ticker,
+                'price': self.spot_price,
+                'volume': info.get('volume', 0),
+                'market_cap': info.get('marketCap', 0),
+                'beta': info.get('beta', 1.0),
+                'dividend_yield': info.get('dividendYield', 0)
+            }
+        except Exception as e:
+            print(f"Error fetching underlying data: {e}")
+            return {'ticker': self.ticker, 'price': 100, 'volume': 0}
     
-    def get_option_chain(self, expiry_date: Optional[str] = None) -> pd.DataFrame:
+    def get_option_chain(self, min_dte: int = 7, max_dte: int = 365) -> pd.DataFrame:
         """
-        Fetch complete options chain for the underlying.
+        Fetch options chain for all available expirations within date range.
         
         Args:
-            expiry_date: Specific expiration date (YYYY-MM-DD). If None, fetches all.
+            min_dte: Minimum days to expiration
+            max_dte: Maximum days to expiration
             
         Returns:
-            DataFrame with options data including strikes, prices, IVs, volumes
+            DataFrame containing options data with columns for strike, expiry, 
+            bid, ask, volume, open interest, implied volatility, etc.
         """
-        ticker_obj = yf.Ticker(self.ticker)
+        self._rate_limit()
         
-        # Get current spot price
-        if self.spot_price is None:
-            self.fetch_underlying_data()
-        
-        # Get all available expiration dates
-        expiry_dates = ticker_obj.options
-        
-        if not expiry_dates:
-            raise ValueError(f"No options data available for {self.ticker}")
-        
-        # If specific expiry requested, use it; otherwise get all
-        dates_to_fetch = [expiry_date] if expiry_date else expiry_dates
-        
-        all_options = []
-        
-        for exp_date in dates_to_fetch:
-            try:
-                # Fetch options chain for this expiry
-                opt_chain = ticker_obj.option_chain(exp_date)
+        try:
+            ticker_obj = yf.Ticker(self.ticker)
+            
+            if self.spot_price is None:
+                self.fetch_underlying_data()
+            
+            expirations = ticker_obj.options
+            
+            if len(expirations) == 0:
+                print(f"No options available for {self.ticker}")
+                return pd.DataFrame()
+            
+            all_options = []
+            
+            for exp_date in expirations:
+                exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+                days_to_expiry = (exp_datetime - datetime.now()).days
                 
-                # Process calls
-                calls = opt_chain.calls.copy()
-                calls['option_type'] = 'call'
-                calls['expiration'] = exp_date
+                if days_to_expiry < min_dte or days_to_expiry > max_dte:
+                    continue
                 
-                # Process puts
-                puts = opt_chain.puts.copy()
-                puts['option_type'] = 'put'
-                puts['expiration'] = exp_date
+                time.sleep(0.5)
                 
-                # Combine
-                combined = pd.concat([calls, puts], ignore_index=True)
-                all_options.append(combined)
-                
-            except Exception as e:
-                print(f"Error fetching data for expiry {exp_date}: {e}")
-                continue
-        
-        if not all_options:
-            raise ValueError("Failed to fetch any options data")
-        
-        # Combine all expiries
-        self.data = pd.concat(all_options, ignore_index=True)
-        
-        # Add calculated fields
-        self._process_options_data()
-        
-        return self.data
+                try:
+                    opt = ticker_obj.option_chain(exp_date)
+                    
+                    calls = opt.calls.copy()
+                    calls['option_type'] = 'call'
+                    calls['expiration'] = exp_date
+                    calls['days_to_expiry'] = days_to_expiry
+                    calls['time_to_expiry'] = days_to_expiry / 365.0
+                    
+                    puts = opt.puts.copy()
+                    puts['option_type'] = 'put'
+                    puts['expiration'] = exp_date
+                    puts['days_to_expiry'] = days_to_expiry
+                    puts['time_to_expiry'] = days_to_expiry / 365.0
+                    
+                    all_options.extend([calls, puts])
+                    
+                except Exception as e:
+                    print(f"Error fetching options for {exp_date}: {e}")
+                    continue
+            
+            if len(all_options) == 0:
+                return pd.DataFrame()
+            
+            options_df = pd.concat(all_options, ignore_index=True)
+            
+            options_df['spot_price'] = self.spot_price
+            options_df['moneyness'] = options_df['strike'] / self.spot_price
+            options_df['mid_price'] = (options_df['bid'] + options_df['ask']) / 2
+            
+            options_df = self._clean_data(options_df)
+            
+            self.data = options_df
+            
+            return options_df
+            
+        except Exception as e:
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                print("Rate limit reached. Please wait and try again.")
+                time.sleep(60)
+            else:
+                print(f"Error fetching option chain: {e}")
+            return pd.DataFrame()
     
-    def _process_options_data(self):
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Process and enrich options data with additional fields.
-        """
-        if self.data is None:
-            return
-        
-        # Convert expiration to datetime
-        self.data['expiration_date'] = pd.to_datetime(self.data['expiration'])
-        
-        # Calculate time to expiration in years
-        today = datetime.now()
-        self.data['time_to_expiry'] = (
-            (self.data['expiration_date'] - today).dt.days / 365.25
-        )
-        
-        # Calculate moneyness (S/K)
-        self.data['moneyness'] = self.spot_price / self.data['strike']
-        
-        # Log moneyness
-        self.data['log_moneyness'] = np.log(self.data['moneyness'])
-        
-        # Mid price
-        self.data['mid_price'] = (self.data['bid'] + self.data['ask']) / 2
-        
-        # Bid-ask spread
-        self.data['spread'] = self.data['ask'] - self.data['bid']
-        self.data['spread_pct'] = (
-            self.data['spread'] / self.data['mid_price'] * 100
-        )
-        
-        # Filter out options with no volume or open interest (stale/illiquid)
-        self.data = self.data[
-            (self.data['volume'].notna() & (self.data['volume'] > 0)) |
-            (self.data['openInterest'].notna() & (self.data['openInterest'] > 0))
-        ].copy()
-        
-        # Filter out deep ITM/OTM options (typically unreliable)
-        self.data = self.data[
-            (self.data['moneyness'] > 0.7) & 
-            (self.data['moneyness'] < 1.3)
-        ].copy()
-        
-        # Filter out very short-dated options (< 7 days)
-        self.data = self.data[self.data['time_to_expiry'] > 7/365].copy()
-        
-    def get_atm_options(self, window: float = 0.02) -> pd.DataFrame:
-        """
-        Get at-the-money options (within a specified window).
+        Clean and filter options data.
         
         Args:
-            window: Percentage window around ATM (default: 2%)
+            df: Raw options DataFrame
             
         Returns:
-            DataFrame with ATM options only
+            Cleaned DataFrame
         """
-        if self.data is None:
+        if len(df) == 0:
+            return df
+        
+        df = df[(df['volume'] > 0) | (df['openInterest'] > 0)].copy()
+        
+        df = df[
+            (df['moneyness'] >= 0.7) & (df['moneyness'] <= 1.3)
+        ].copy()
+        
+        if 'impliedVolatility' in df.columns:
+            df = df[
+                (df['impliedVolatility'] > 0) & (df['impliedVolatility'] < 3.0)
+            ].copy()
+        
+        df['volume'].fillna(0, inplace=True)
+        df['openInterest'].fillna(0, inplace=True)
+        
+        return df
+    
+    def calculate_time_to_expiry(self, expiry_date: str) -> float:
+        """
+        Calculate time to expiry in years.
+        
+        Args:
+            expiry_date: Expiration date string (YYYY-MM-DD)
+            
+        Returns:
+            Time to expiry in years
+        """
+        exp_dt = datetime.strptime(expiry_date, '%Y-%m-%d')
+        days_to_expiry = (exp_dt - datetime.now()).days
+        return max(days_to_expiry / 365.0, 1/365.0)
+    
+    def get_atm_options(self, tolerance: float = 0.05) -> pd.DataFrame:
+        """
+        Filter for at-the-money options.
+        
+        Args:
+            tolerance: Moneyness tolerance (default 5%)
+            
+        Returns:
+            DataFrame with ATM options
+        """
+        if self.data is None or len(self.data) == 0:
             self.get_option_chain()
         
-        atm_filter = (
-            (self.data['moneyness'] >= 1 - window) &
-            (self.data['moneyness'] <= 1 + window)
+        if self.data is None or len(self.data) == 0:
+            return pd.DataFrame()
+        
+        atm_mask = (
+            (self.data['moneyness'] >= 1 - tolerance) &
+            (self.data['moneyness'] <= 1 + tolerance)
         )
         
-        return self.data[atm_filter].copy()
+        return self.data[atm_mask].copy()
     
     def get_options_by_expiry(self, expiry_date: str) -> pd.DataFrame:
         """
         Get all options for a specific expiration date.
         
         Args:
-            expiry_date: Expiration date in YYYY-MM-DD format
+            expiry_date: Expiration date (YYYY-MM-DD)
             
         Returns:
-            DataFrame filtered to specific expiry
+            DataFrame with options for that expiry
         """
-        if self.data is None:
+        if self.data is None or len(self.data) == 0:
             self.get_option_chain()
+        
+        if self.data is None or len(self.data) == 0:
+            return pd.DataFrame()
         
         return self.data[self.data['expiration'] == expiry_date].copy()
     
-    def get_surface_grid(
-        self, 
-        option_type: str = 'call',
-        min_maturity_days: int = 7,
-        max_maturity_days: int = 365
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get_unique_expiries(self) -> List[str]:
         """
-        Prepare grid data for volatility surface construction.
+        Get list of unique expiration dates in the data.
         
-        Args:
-            option_type: 'call' or 'put'
-            min_maturity_days: Minimum time to expiry in days
-            max_maturity_days: Maximum time to expiry in days
-            
         Returns:
-            Tuple of (strikes, maturities, implied_vols) as 2D arrays
+            Sorted list of expiration dates
         """
-        if self.data is None:
+        if self.data is None or len(self.data) == 0:
             self.get_option_chain()
         
-        # Filter by option type
-        filtered = self.data[self.data['option_type'] == option_type].copy()
+        if self.data is None or len(self.data) == 0:
+            return []
         
-        # Filter by maturity range
-        filtered = filtered[
-            (filtered['time_to_expiry'] >= min_maturity_days/365) &
-            (filtered['time_to_expiry'] <= max_maturity_days/365)
-        ].copy()
-        
-        # Remove options with invalid implied volatility
-        filtered = filtered[
-            filtered['impliedVolatility'].notna() &
-            (filtered['impliedVolatility'] > 0) &
-            (filtered['impliedVolatility'] < 3)  # Remove outliers > 300%
-        ].copy()
-        
-        if filtered.empty:
-            raise ValueError("No valid options data for surface construction")
-        
-        # Create grid
-        strikes = filtered['strike'].values
-        maturities = filtered['time_to_expiry'].values
-        ivs = filtered['impliedVolatility'].values
-        
-        return strikes, maturities, ivs
+        return sorted(self.data['expiration'].unique().tolist())
     
-    def get_term_structure(self, option_type: str = 'call') -> pd.DataFrame:
+    def get_strike_range(self, moneyness_range: Tuple[float, float] = (0.8, 1.2)) -> List[float]:
         """
-        Get ATM volatility term structure.
+        Get strikes within a moneyness range.
         
         Args:
-            option_type: 'call' or 'put'
+            moneyness_range: Tuple of (min_moneyness, max_moneyness)
             
         Returns:
-            DataFrame with maturity vs ATM implied vol
+            Sorted list of strikes
         """
-        atm_data = self.get_atm_options()
-        term_structure = atm_data[
-            atm_data['option_type'] == option_type
-        ].groupby('expiration').agg({
-            'impliedVolatility': 'mean',
-            'time_to_expiry': 'first'
-        }).reset_index()
-        
-        term_structure = term_structure.sort_values('time_to_expiry')
-        
-        return term_structure
-    
-    def compute_summary_statistics(self) -> Dict:
-        """
-        Compute summary statistics for the options chain.
-        
-        Returns:
-            Dictionary with key metrics
-        """
-        if self.data is None:
+        if self.data is None or len(self.data) == 0:
             self.get_option_chain()
         
-        calls = self.data[self.data['option_type'] == 'call']
-        puts = self.data[self.data['option_type'] == 'put']
+        if self.data is None or len(self.data) == 0:
+            return []
         
-        return {
-            'total_options': len(self.data),
-            'num_calls': len(calls),
-            'num_puts': len(puts),
-            'num_expiries': self.data['expiration'].nunique(),
-            'avg_iv_calls': calls['impliedVolatility'].mean(),
-            'avg_iv_puts': puts['impliedVolatility'].mean(),
-            'total_volume': self.data['volume'].sum(),
-            'total_open_interest': self.data['openInterest'].sum(),
-            'avg_spread_pct': self.data['spread_pct'].mean(),
-            'spot_price': self.spot_price
-        }
-
-
-# Example usage
-if __name__ == "__main__":
-    # Initialize fetcher for SPY
-    fetcher = OptionDataFetcher(ticker='SPY')
+        min_m, max_m = moneyness_range
+        
+        strikes = self.data[
+            (self.data['moneyness'] >= min_m) &
+            (self.data['moneyness'] <= max_m)
+        ]['strike'].unique()
+        
+        return sorted(strikes.tolist())
     
-    # Get underlying data
-    underlying = fetcher.fetch_underlying_data()
-    print(f"Spot Price: ${underlying['price']:.2f}")
-    
-    # Fetch complete options chain
-    options_data = fetcher.get_option_chain()
-    print(f"\nFetched {len(options_data)} options contracts")
-    
-    # Get summary statistics
-    stats = fetcher.compute_summary_statistics()
-    print(f"\nSummary Statistics:")
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
-    
-    # Get ATM volatility term structure
-    term_struct = fetcher.get_term_structure(option_type='call')
-    print(f"\nATM Term Structure:")
-    print(term_struct)
+    def refresh_data(self):
+        """
+        Clear cached data and force refresh on next fetch.
+        """
+        self.data = None
+        self.spot_price = None
+        self._underlying = None
