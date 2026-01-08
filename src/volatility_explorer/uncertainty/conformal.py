@@ -5,7 +5,7 @@ Implements distribution-free prediction intervals for implied volatility.
 
 import numpy as np
 import pandas as pd
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 from scipy.interpolate import interp1d
 from sklearn.model_selection import train_test_split
 
