@@ -18,6 +18,12 @@ from uncertainty.conformal import ConformalPredictor, VolatilitySurfaceUncertain
 from visualization.surface_plot import VolatilitySurfacePlotter
 from arbitrage.detector import ArbitrageDetector
 
+# Force reload modules on every run
+if 'modules_reloaded' not in st.session_state:
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.session_state.modules_reloaded = True
+
 # Page configuration
 st.set_page_config(
     page_title="Volatility Surface Explorer",
